@@ -161,8 +161,7 @@ const Overview = () => {
     { icon: '📞', bg: '#0c2a5c', label: 'Calls Made Today',    value: String(callsToday),     change: `${callsThisWeek} this week`,    up: true,  spark: [callsThisWeek*.4, callsThisWeek*.6, callsThisWeek*.8, callsThisWeek*.9, callsThisWeek], color: '#3b82f6' },
     { icon: '👥', bg: '#052e16', label: 'Human Conversations', value: String(convsToday),     change: `${convsThisWeek} this week`,    up: true,  spark: [convsThisWeek*.4, convsThisWeek*.6, convsThisWeek*.8, convsThisWeek*.9, convsThisWeek], color: '#22c55e' },
     { icon: '📈', bg: '#1e1b4b', label: 'Conversation Rate',   value: `${convRateCalc}%`,     change: `↑ vs last week`,               up: true,  spark: [16,18,20,19,convRateCalc], color: '#a5b4fc' },
-    { icon: '📵', bg: '#450a0a', label: 'No Answers',          value: String(noAnswerToday),  change: `— vs yesterday`,               up: false, spark: [25,28,22,30,noAnswerToday], color: '#ef4444' },
-    { icon: '📅', bg: '#0c1a2e', label: 'Meetings Booked',     value: String(meetingsToday),  change: `${meetingsThisWeek} this week`, up: true,  spark: [meetingsThisWeek*.3, meetingsThisWeek*.5, meetingsThisWeek*.7, meetingsThisWeek*.9, meetingsThisWeek], color: '#60a5fa' },
+    { icon: '🚫', bg: '#450a0a', label: 'Not Interested', value: String(notInterested), change: `— vs yesterday`, up: false, spark: [3,5,4,6,notInterested], color: '#ef4444' },    { icon: '📅', bg: '#0c1a2e', label: 'Meetings Booked',     value: String(meetingsToday),  change: `${meetingsThisWeek} this week`, up: true,  spark: [meetingsThisWeek*.3, meetingsThisWeek*.5, meetingsThisWeek*.7, meetingsThisWeek*.9, meetingsThisWeek], color: '#60a5fa' },
     { icon: '🚀', bg: '#052e16', label: 'Conv. Momentum',      value: `${momentum >= 0 ? '+' : ''}${momentum}%`, change: 'vs last week', up: momentum >= 0, spark: [5,10,15,20,momentum], color: '#22c55e' },
   ];
 
