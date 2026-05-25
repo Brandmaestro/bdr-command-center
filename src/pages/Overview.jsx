@@ -388,7 +388,7 @@ const Overview = () => {
     { label: 'Calls Made Today',    value: String(callsToday),    change: `— vs yesterday`,                       up: null,          color: '#60a5fa', bg: '#1e3a5f', icon: '📞', spark: [callsThisWeek*.3,callsThisWeek*.5,callsThisWeek*.7,callsThisWeek*.85,callsThisWeek] },
     { label: 'Human Conversations', value: String(convsToday),    change: `${convsThisWeek > 0 ? '+' : ''}${convsThisWeek - (convsLastWeek||0)} vs yesterday`, up: convsThisWeek >= (convsLastWeek||0), color: C.green,   bg: '#052e16', icon: '👥', spark: [convsThisWeek*.3,convsThisWeek*.5,convsThisWeek*.7,convsThisWeek*.9,convsThisWeek] },
     { label: 'Conversation Rate',   value: `${convRate}%`,        change: `↑ 3.7% vs yesterday`,                  up: true,          color: C.purple,  bg: '#1e1b4b', icon: '📈', spark: [18,20,19,22,parseFloat(convRate)] },
-    { label: 'No Answers',          value: String(noAnswer),      change: `${noAnswer > 0 ? '↓' : '—'} 5 vs yesterday`, up: false,  color: C.red,     bg: '#450a0a', icon: '📵', spark: [35,30,28,32,noAnswer] },
+    { label: 'Not Interested', value: String(notInterested), change: `— vs yesterday`, up: false, color: C.red, bg: '#450a0a', icon: '🚫', spark: [5,4,6,3,notInterested] },
     { label: 'Meetings Booked',     value: String(meetingsToday), change: `— vs yesterday`,                        up: null,          color: '#60a5fa', bg: '#0c1a2e', icon: '📅', spark: [meetingsThisWeek*.2,meetingsThisWeek*.4,meetingsThisWeek*.6,meetingsThisWeek*.8,meetingsThisWeek] },
     { label: 'Conversation Momentum', value: `${momentum >= 0 ? '+' : ''}${momentum}%`, change: `vs last week`,   up: momentum >= 0, color: C.green,   bg: '#052e16', icon: '🚀', spark: [5,10,15,20,Math.max(0, momentum)] },
   ];
