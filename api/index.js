@@ -366,7 +366,8 @@ async function handleTrends(req, res) {
           EXTRACT(HOUR FROM call_timestamp)::int as hour, COUNT(*)::int as total_calls,
           SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int as conversations
         FROM public.calls WHERE client_id = 1 AND call_date >= DATE_TRUNC('month', CURRENT_DATE)
-        GROUP BY day_of_week, hour ORDER BY day_of_week, hour
+        GROUP BY EXTRACT(DOW FROM call_timestamp), EXTRACT(HOUR FROM call_timestamp)
+        ORDER BY day_of_week, hour
       `),
       client.query(`
         SELECT TO_CHAR(call_date, 'Day') as day_name, EXTRACT(DOW FROM call_date)::int as day_num,
@@ -375,7 +376,8 @@ async function handleTrends(req, res) {
           SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_booked,
           CAST(100.0 * SUM(CASE WHEN contact_outcome = 'No Answer' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) as no_answer_rate
         FROM public.calls WHERE client_id = 1 AND call_date >= DATE_TRUNC('month', CURRENT_DATE)
-        GROUP BY day_name, day_num ORDER BY day_num
+        GROUP BY TO_CHAR(call_date, 'Day'), EXTRACT(DOW FROM call_date)
+        ORDER BY day_num
       `),
       client.query(`
         SELECT EXTRACT(HOUR FROM call_timestamp)::int as hour, COUNT(*)::int as total_calls,
@@ -777,7 +779,8 @@ async function handleMeetings(req, res) {
           EXTRACT(HOUR FROM c.call_timestamp)::int as hour, COUNT(*)::int as meetings_booked
         FROM public.calls c WHERE c.client_id = 1 AND c.meeting_booked = true
         AND c.call_date >= DATE_TRUNC('month', CURRENT_DATE)
-        GROUP BY day_of_week, hour ORDER BY day_of_week, hour
+        GROUP BY EXTRACT(DOW FROM c.call_timestamp), EXTRACT(HOUR FROM c.call_timestamp)
+        ORDER BY day_of_week, hour
       `),
       client.query(`
         SELECT m.id, m.meeting_datetime, m.cal_meeting_url, m.cal_status,
