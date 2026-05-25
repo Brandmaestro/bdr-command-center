@@ -125,8 +125,9 @@ function AppInner() {
               <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
             </svg>
           </div>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "#e2e8f0", lineHeight: 1.3, textTransform: "uppercase", letterSpacing: ".6px" }}>
-            Outbound<br />Command Center
+          <div style={{ lineHeight: 1.2 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: "#e2e8f0", letterSpacing: "1.5px" }}>AVINTRA</div>
+            <div style={{ fontSize: 9, fontWeight: 600, color: "#475569", letterSpacing: "3px" }}>LABS</div>
           </div>
         </div>
 
