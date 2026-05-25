@@ -220,18 +220,17 @@ async function handlePerformance(req, res) {
         GROUP BY COALESCE(initiated_by, 'Didier') ORDER BY calls DESC
       `),
       client.query(`
-        SELECT dt.daily_calls_target, dt.daily_conversations_target, dt.daily_meetings_target, dt.daily_conv_rate_target,
+        SELECT dt.calls_goal, dt.conversations_goal, dt.meetings_goal,
           COALESCE(a.calls_today, 0) as calls_actual, COALESCE(a.conv_today, 0) as conv_actual,
-          COALESCE(a.meetings_today, 0) as meetings_actual, COALESCE(a.conv_rate_today, 0) as conv_rate_actual
+          COALESCE(a.meetings_today, 0) as meetings_actual
         FROM public.daily_targets dt
         LEFT JOIN (
           SELECT COUNT(*)::int as calls_today,
             SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int as conv_today,
-            SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_today,
-            CAST(100.0 * SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) as conv_rate_today
+            SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_today
           FROM public.calls WHERE client_id = 1 AND call_date = CURRENT_DATE
         ) a ON true
-        WHERE dt.client_id = 1 LIMIT 1
+        ORDER BY dt.target_date DESC LIMIT 1
       `),
       client.query(`
         SELECT EXTRACT(HOUR FROM call_timestamp)::int as best_conv_hour,
@@ -573,18 +572,16 @@ async function handleScorecard(req, res) {
         WHERE c.client_id = 1 AND c.call_date >= DATE_TRUNC('month', CURRENT_DATE)
       `),
       client.query(`
-        SELECT dt.daily_calls_target * 20 as calls_goal, dt.daily_conversations_target * 20 as conv_goal,
-          dt.daily_meetings_target * 20 as meetings_goal, dt.daily_conv_rate_target as conv_rate_goal,
+        SELECT dt.calls_goal, dt.conversations_goal, dt.meetings_goal,
           COALESCE(a.calls_actual, 0) as calls_actual, COALESCE(a.conv_actual, 0) as conv_actual,
-          COALESCE(a.meetings_actual, 0) as meetings_actual, COALESCE(a.conv_rate_actual, 0) as conv_rate_actual
+          COALESCE(a.meetings_actual, 0) as meetings_actual
         FROM public.daily_targets dt
         LEFT JOIN (
           SELECT COUNT(*)::int as calls_actual,
             SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int as conv_actual,
-            SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_actual,
-            CAST(100.0 * SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) as conv_rate_actual
+            SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_actual
           FROM public.calls WHERE client_id = 1 AND call_date >= DATE_TRUNC('month', CURRENT_DATE)
-        ) a ON true WHERE dt.client_id = 1 LIMIT 1
+        ) a ON true ORDER BY dt.target_date DESC LIMIT 1
       `),
       client.query(`
         SELECT c.call_date, TO_CHAR(c.call_date, 'Mon DD') as date_label,
