@@ -751,13 +751,21 @@ async function handleMeetings(req, res) {
       `),
       client.query(`
         SELECT CASE
-            WHEN c.call_type ILIKE '%cold%' OR c.call_direction = 'outbound' THEN 'Cold Call'
-            WHEN c.call_type ILIKE '%follow%' THEN 'Follow-Up'
+            WHEN c.call_direction = 'outbound' THEN 'Cold Call'
+            WHEN c.contact_outcome ILIKE '%follow%' THEN 'Follow-Up'
+            WHEN c.contact_outcome ILIKE '%referral%' THEN 'Referral'
             ELSE 'Other'
           END as source, COUNT(*)::int as count,
           CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) as percentage
         FROM public.meetings m JOIN public.calls c ON c.id = m.call_id
-        WHERE c.client_id = 1 GROUP BY source ORDER BY count DESC
+        WHERE c.client_id = 1
+        GROUP BY CASE
+            WHEN c.call_direction = 'outbound' THEN 'Cold Call'
+            WHEN c.contact_outcome ILIKE '%follow%' THEN 'Follow-Up'
+            WHEN c.contact_outcome ILIKE '%referral%' THEN 'Referral'
+            ELSE 'Other'
+          END
+        ORDER BY count DESC
       `),
       client.query(`
         SELECT COALESCE(m.cal_status, 'booked') as stage, COUNT(*)::int as count,
