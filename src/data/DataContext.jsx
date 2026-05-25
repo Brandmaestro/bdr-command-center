@@ -4,19 +4,19 @@ export const DataContext = createContext();
 
 // ── Endpoint map — one per page ──────────────────────────────────
 const ENDPOINTS = {
-  overview:    '/api/dashboard',
-  performance: '/api/performance',
-  activity:    '/api/activity',
-  trends:      '/api/trends',
-  outcomes:    '/api/outcomes',
-  time:        '/api/time',
-  scorecard:   '/api/scorecard',
-  coaching:    '/api/coaching',
-  meetings:    '/api/meetings',
-  prospects:   '/api/prospects',
-  research:    '/api/research',
-  reports:     '/api/reports',
-  settings:    '/api/settings',
+  overview:    '/api/index?page=dashboard',
+  performance: '/api/index?page=performance',
+  activity:    '/api/index?page=activity',
+  trends:      '/api/index?page=trends',
+  outcomes:    '/api/index?page=outcomes',
+  time:        '/api/index?page=time',
+  scorecard:   '/api/index?page=scorecard',
+  coaching:    '/api/index?page=coaching',
+  meetings:    '/api/index?page=meetings',
+  prospects:   '/api/index?page=prospects',
+  research:    '/api/index?page=research',
+  reports:     '/api/index?page=reports',
+  settings:    '/api/index?page=settings',
 };
 
 // ── Normalize overview data (keeps Overview.jsx working unchanged) ─
