@@ -362,11 +362,11 @@ async function handleTrends(req, res) {
         GROUP BY call_date ORDER BY call_date
       `),
       client.query(`
-        SELECT EXTRACT(DOW FROM call_timestamp)::int as day_of_week,
-          EXTRACT(HOUR FROM call_timestamp)::int as hour, COUNT(*)::int as total_calls,
+        SELECT day_of_week, call_hour as hour, COUNT(*)::int as total_calls,
           SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int as conversations
         FROM public.calls WHERE client_id = 1 AND call_date >= DATE_TRUNC('month', CURRENT_DATE)
-        GROUP BY EXTRACT(DOW FROM call_timestamp), EXTRACT(HOUR FROM call_timestamp)
+        AND day_of_week IS NOT NULL AND call_hour IS NOT NULL
+        GROUP BY day_of_week, call_hour
         ORDER BY day_of_week, hour
       `),
       client.query(`
@@ -725,29 +725,38 @@ async function handleMeetings(req, res) {
           SUM(CASE WHEN c.call_date >= DATE_TRUNC('week', CURRENT_DATE) AND c.meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_this_week,
           SUM(CASE WHEN c.call_date >= DATE_TRUNC('week', CURRENT_DATE) - INTERVAL '7 days' AND c.call_date < DATE_TRUNC('week', CURRENT_DATE) AND c.meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_last_week,
           CAST(AVG(CASE WHEN c.call_date >= DATE_TRUNC('week', CURRENT_DATE) AND c.meeting_booked = true THEN NULLIF(c.overall_call_score, 0) END) AS DECIMAL(5,1)) as avg_quality_this_week,
-          CAST(100.0 * SUM(CASE WHEN c.call_date >= DATE_TRUNC('week', CURRENT_DATE) AND c.meeting_booked = true THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN c.call_date >= DATE_TRUNC('week', CURRENT_DATE) AND c.is_human_conversation = true THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) as meeting_conv_rate_this_week
+          CAST(100.0 * SUM(CASE WHEN c.call_date >= DATE_TRUNC('week', CURRENT_DATE) AND c.meeting_booked = true THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN c.call_date >= DATE_TRUNC('week', CURRENT_DATE) AND c.is_human_conversation = true THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) as meeting_conv_rate_this_week,
+          CAST(AVG(CASE WHEN c.call_date >= DATE_TRUNC('week', CURRENT_DATE) AND c.meeting_booked = true THEN NULLIF(c.call_duration_seconds, 0) END) AS INTEGER) as avg_call_duration_seconds
         FROM public.calls c WHERE c.client_id = 1 AND c.call_date >= DATE_TRUNC('week', CURRENT_DATE) - INTERVAL '7 days'
       `),
       client.query(`
         SELECT m.id, m.meeting_datetime, m.cal_status, m.cal_meeting_url,
           m.invitee_first_name, m.invitee_last_name, m.invitee_email, m.meeting_duration, m.est_pipeline_value,
+          m.meeting_type, m.meeting_status, m.ai_quality_score,
+          m.pain_identified_score, m.budget_mentioned_score, m.timeline_identified_score,
+          m.decision_maker_score, m.technical_fit_score, m.urgency_level_score,
           c.company_name, c.contact_name, c.overall_call_score, c.call_timestamp, c.call_date, c.call_time,
           c.call_duration_seconds, COALESCE(c.initiated_by, 'Didier') as sdr_name,
-          ci.ai_summary, ci.conversation_detail, ci.technical_fit_score
+          ci.ai_summary, ci.conversation_detail, ci.technical_fit_score as ci_technical_fit_score
         FROM public.meetings m JOIN public.calls c ON c.id = m.call_id
         LEFT JOIN public.call_intelligence ci ON ci.call_id = c.id
         WHERE c.client_id = 1 ORDER BY m.meeting_datetime DESC LIMIT 25
       `),
       client.query(`
         SELECT CASE
-            WHEN c.overall_call_score >= 8 THEN 'High Quality (8-10)'
-            WHEN c.overall_call_score >= 6 THEN 'Medium Quality (6-7.9)'
+            WHEN COALESCE(m.ai_quality_score, c.overall_call_score, 0) >= 8 THEN 'High Quality (8-10)'
+            WHEN COALESCE(m.ai_quality_score, c.overall_call_score, 0) >= 6 THEN 'Medium Quality (6-7.9)'
             ELSE 'Low Quality (<6)'
           END as quality_tier, COUNT(*)::int as count,
           CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) as percentage
         FROM public.meetings m JOIN public.calls c ON c.id = m.call_id
-        WHERE c.client_id = 1 AND c.overall_call_score IS NOT NULL AND c.overall_call_score > 0
-        GROUP BY quality_tier ORDER BY count DESC
+        WHERE c.client_id = 1
+        GROUP BY CASE
+            WHEN COALESCE(m.ai_quality_score, c.overall_call_score, 0) >= 8 THEN 'High Quality (8-10)'
+            WHEN COALESCE(m.ai_quality_score, c.overall_call_score, 0) >= 6 THEN 'Medium Quality (6-7.9)'
+            ELSE 'Low Quality (<6)'
+          END
+        ORDER BY count DESC
       `),
       client.query(`
         SELECT CASE
@@ -768,31 +777,38 @@ async function handleMeetings(req, res) {
         ORDER BY count DESC
       `),
       client.query(`
-        SELECT COALESCE(m.cal_status, 'booked') as stage, COUNT(*)::int as count,
+        SELECT COALESCE(m.pipeline_stage, m.meeting_status, 'Booked') as stage, COUNT(*)::int as count,
           CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) as pct_of_total,
           CAST(COALESCE(SUM(m.est_pipeline_value), 0) AS DECIMAL(12,2)) as pipeline_value
         FROM public.meetings m JOIN public.calls c ON c.id = m.call_id
-        WHERE c.client_id = 1 GROUP BY COALESCE(m.cal_status, 'booked') ORDER BY count DESC
+        WHERE c.client_id = 1
+        GROUP BY COALESCE(m.pipeline_stage, m.meeting_status, 'Booked')
+        ORDER BY count DESC
       `),
       client.query(`
-        SELECT CAST(AVG(NULLIF(ci.technical_fit_score, 0)) AS DECIMAL(5,1)) as technical_fit_avg,
-          CAST(AVG(NULLIF(ci.sentiment_score, 0)) AS DECIMAL(5,1)) as sentiment_avg,
-          CAST(AVG(NULLIF(ci.overall_score, 0)) AS DECIMAL(5,1)) as overall_avg,
+        SELECT CAST(AVG(NULLIF(m.ai_quality_score, 0)) AS DECIMAL(5,1)) as overall_avg,
+          CAST(AVG(NULLIF(m.pain_identified_score, 0)) AS DECIMAL(5,1)) as pain_identified_avg,
+          CAST(AVG(NULLIF(m.budget_mentioned_score, 0)) AS DECIMAL(5,1)) as budget_mentioned_avg,
+          CAST(AVG(NULLIF(m.timeline_identified_score, 0)) AS DECIMAL(5,1)) as timeline_avg,
+          CAST(AVG(NULLIF(m.decision_maker_score, 0)) AS DECIMAL(5,1)) as decision_maker_avg,
+          CAST(AVG(NULLIF(m.technical_fit_score, 0)) AS DECIMAL(5,1)) as technical_fit_avg,
+          CAST(AVG(NULLIF(m.urgency_level_score, 0)) AS DECIMAL(5,1)) as urgency_avg,
           COUNT(*)::int as meetings_analyzed
-        FROM public.call_intelligence ci JOIN public.calls c ON c.id = ci.call_id
-        WHERE c.client_id = 1 AND c.meeting_booked = true AND c.call_date >= DATE_TRUNC('month', CURRENT_DATE)
+        FROM public.meetings m JOIN public.calls c ON c.id = m.call_id
+        WHERE c.client_id = 1 AND c.call_date >= DATE_TRUNC('month', CURRENT_DATE)
       `),
       client.query(`
-        SELECT EXTRACT(DOW FROM c.call_timestamp)::int as day_of_week,
-          EXTRACT(HOUR FROM c.call_timestamp)::int as hour, COUNT(*)::int as meetings_booked
+        SELECT c.day_of_week, c.call_hour as hour, COUNT(*)::int as meetings_booked
         FROM public.calls c WHERE c.client_id = 1 AND c.meeting_booked = true
         AND c.call_date >= DATE_TRUNC('month', CURRENT_DATE)
-        GROUP BY EXTRACT(DOW FROM c.call_timestamp), EXTRACT(HOUR FROM c.call_timestamp)
+        AND c.day_of_week IS NOT NULL AND c.call_hour IS NOT NULL
+        GROUP BY c.day_of_week, c.call_hour
         ORDER BY day_of_week, hour
       `),
       client.query(`
         SELECT m.id, m.meeting_datetime, m.cal_meeting_url, m.cal_status,
           m.invitee_first_name, m.invitee_last_name, m.meeting_duration,
+          m.meeting_type, m.ai_quality_score,
           c.company_name, c.contact_name, c.overall_call_score, ci.conversation_detail
         FROM public.meetings m JOIN public.calls c ON c.id = m.call_id
         LEFT JOIN public.call_intelligence ci ON ci.call_id = c.id
@@ -1022,7 +1038,7 @@ async function handleSettings(req, res) {
     const [prefsResult, notifsResult, userResult, orgResult] = await Promise.all([
       client.query(`SELECT * FROM public.user_dashboard_preferences WHERE user_id = 1`),
       client.query(`SELECT * FROM public.user_notification_preferences WHERE user_id = 1`),
-      client.query(`SELECT id, name, email, role, org_id FROM public.users WHERE id = 1`),
+      client.query(`SELECT id, first_name || ' ' || last_name as name, email, role, org_id FROM public.users WHERE id = 1`),
       client.query(`SELECT id, name FROM public.organizations WHERE id = 1`),
     ]);
     client.release();
