@@ -15,7 +15,6 @@ export default async function handler(req, res) {
 
   const page = req.query.page || 'dashboard';
 
-  // ── POST routes (settings + reports) ─────────────────────────
   if (req.method === 'POST') {
     if (page === 'settings') return handleSettingsSave(req, res);
     if (page === 'reports')  return handleReportLog(req, res);
@@ -26,10 +25,10 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // ── Route to correct handler ──────────────────────────────────
   switch (page) {
     case 'dashboard':    return handleDashboard(req, res);
     case 'performance':  return handlePerformance(req, res);
+    case 'filters':      return handleFilters(req, res);
     case 'activity':     return handleActivity(req, res);
     case 'trends':       return handleTrends(req, res);
     case 'outcomes':     return handleOutcomes(req, res);
@@ -42,6 +41,62 @@ export default async function handler(req, res) {
     case 'reports':      return handleReports(req, res);
     case 'settings':     return handleSettings(req, res);
     default:             return res.status(404).json({ error: 'Unknown page' });
+  }
+}
+
+// ── DATE RANGE HELPER ─────────────────────────────────────────────
+function getDateFilter(dateRange, customStart, customEnd) {
+  switch (dateRange) {
+    case 'Today':
+      return { current: `call_date = CURRENT_DATE`, prev: `call_date = CURRENT_DATE - INTERVAL '1 day'`, label: 'vs yesterday' };
+    case 'Yesterday':
+      return { current: `call_date = CURRENT_DATE - INTERVAL '1 day'`, prev: `call_date = CURRENT_DATE - INTERVAL '2 days'`, label: 'vs day before' };
+    case 'This Week':
+      return { current: `call_date >= DATE_TRUNC('week', CURRENT_DATE)`, prev: `call_date >= DATE_TRUNC('week', CURRENT_DATE) - INTERVAL '7 days' AND call_date < DATE_TRUNC('week', CURRENT_DATE)`, label: 'vs last week' };
+    case 'Last Week':
+      return { current: `call_date >= DATE_TRUNC('week', CURRENT_DATE) - INTERVAL '7 days' AND call_date < DATE_TRUNC('week', CURRENT_DATE)`, prev: `call_date >= DATE_TRUNC('week', CURRENT_DATE) - INTERVAL '14 days' AND call_date < DATE_TRUNC('week', CURRENT_DATE) - INTERVAL '7 days'`, label: 'vs week before' };
+    case 'This Month':
+      return { current: `call_date >= DATE_TRUNC('month', CURRENT_DATE)`, prev: `call_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month' AND call_date < DATE_TRUNC('month', CURRENT_DATE)`, label: 'vs last month' };
+    case 'Last Month':
+      return { current: `call_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month' AND call_date < DATE_TRUNC('month', CURRENT_DATE)`, prev: `call_date >= DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '2 months' AND call_date < DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1 month'`, label: 'vs month before' };
+    case 'Custom':
+      if (customStart && customEnd) {
+        return { current: `call_date >= '${customStart}' AND call_date <= '${customEnd}'`, prev: null, label: 'custom range' };
+      }
+    default:
+      return { current: `call_date = CURRENT_DATE`, prev: `call_date = CURRENT_DATE - INTERVAL '1 day'`, label: 'vs yesterday' };
+  }
+}
+
+const NO_INTEREST_OUTCOMES = `(
+  'Not Interested', 'Do Not Call', 'No Interest', 'No Thank You',
+  'I Am Fine', 'I Am Good', 'No', 'Hang Up After Introduction'
+)`;
+
+function buildExtraFilters(bdr, company) {
+  const clauses = [];
+  if (bdr     && bdr     !== 'All') clauses.push(`bdr_name = '${bdr.replace(/'/g, "''")}'`);
+  if (company && company !== 'All') clauses.push(`company_name = '${company.replace(/'/g, "''")}'`);
+  return clauses.length ? 'AND ' + clauses.join(' AND ') : '';
+}
+
+// ── FILTERS ───────────────────────────────────────────────────────
+async function handleFilters(req, res) {
+  let client;
+  try {
+    client = await pool.connect();
+    const [bdrResult, companyResult] = await Promise.all([
+      client.query(`SELECT DISTINCT bdr_name FROM public.calls WHERE client_id = 1 AND bdr_name IS NOT NULL ORDER BY bdr_name`),
+      client.query(`SELECT DISTINCT company_name FROM public.calls WHERE client_id = 1 AND company_name IS NOT NULL ORDER BY company_name`),
+    ]);
+    client.release();
+    return res.status(200).json({
+      bdrs:      bdrResult.rows.map(r => r.bdr_name),
+      companies: companyResult.rows.map(r => r.company_name),
+    });
+  } catch (error) {
+    if (client) client.release();
+    return res.status(500).json({ error: 'Database error', message: error.message });
   }
 }
 
@@ -176,79 +231,238 @@ async function handlePerformance(req, res) {
   let client;
   try {
     client = await pool.connect();
-    const [snapshotResult, performanceTrendResult, convRateTrendResult, outcomeBreakdownResult, topPerformersResult, goalTrackingResult, quickStatsResult] = await Promise.all([
+
+    const dateRange   = req.query.dateRange   || 'Today';
+    const customStart = req.query.customStart || '';
+    const customEnd   = req.query.customEnd   || '';
+    const bdr         = req.query.bdr         || 'All';
+    const company     = req.query.company     || 'All';
+
+    const { current: dateFilter, prev: prevFilter, label: compareLabel } =
+      getDateFilter(dateRange, customStart, customEnd);
+
+    const extra        = buildExtraFilters(bdr, company);
+    const baseWhere    = `client_id = 1 AND (${dateFilter}) ${extra}`;
+    const allTimeWhere = `client_id = 1 ${extra}`;
+
+    const [
+      snapshotResult,
+      performanceTrendResult,
+      convRateTrendResult,
+      outcomeBreakdownResult,
+      topPerformersResult,
+      goalTrackingResult,
+      bookingEfficiencyResult,
+      noInterestResetResult,
+      streakResult,
+      bestRunResult,
+    ] = await Promise.all([
+
+      // ── SNAPSHOT ──────────────────────────────────────────────
       client.query(`
         SELECT
-          SUM(CASE WHEN call_date = CURRENT_DATE THEN 1 ELSE 0 END)::int as calls_today,
-          SUM(CASE WHEN call_date = CURRENT_DATE - INTERVAL '1 day' THEN 1 ELSE 0 END)::int as calls_yesterday,
-          SUM(CASE WHEN call_date = CURRENT_DATE AND is_human_conversation = true THEN 1 ELSE 0 END)::int as conv_today,
-          SUM(CASE WHEN call_date = CURRENT_DATE - INTERVAL '1 day' AND is_human_conversation = true THEN 1 ELSE 0 END)::int as conv_yesterday,
-          SUM(CASE WHEN call_date = CURRENT_DATE AND meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_today,
-          SUM(CASE WHEN call_date = CURRENT_DATE - INTERVAL '1 day' AND meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_yesterday,
-          SUM(CASE WHEN call_date = CURRENT_DATE AND contact_outcome = 'No Answer' THEN 1 ELSE 0 END)::int as no_answers_today,
-          SUM(CASE WHEN call_date = CURRENT_DATE - INTERVAL '1 day' AND contact_outcome = 'No Answer' THEN 1 ELSE 0 END)::int as no_answers_yesterday,
-          CAST(100.0 * SUM(CASE WHEN call_date = CURRENT_DATE AND is_human_conversation = true THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN call_date = CURRENT_DATE THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) as conv_rate_today,
-          CAST(100.0 * SUM(CASE WHEN call_date = CURRENT_DATE - INTERVAL '1 day' AND is_human_conversation = true THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN call_date = CURRENT_DATE - INTERVAL '1 day' THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) as conv_rate_yesterday
-        FROM public.calls WHERE client_id = 1 AND call_date >= CURRENT_DATE - INTERVAL '1 day'
+          SUM(CASE WHEN (${dateFilter}) ${extra} THEN 1 ELSE 0 END)::int AS calls_today,
+          ${prevFilter ? `SUM(CASE WHEN (${prevFilter}) ${extra} THEN 1 ELSE 0 END)::int` : '0::int'} AS calls_yesterday,
+          SUM(CASE WHEN (${dateFilter}) ${extra} AND is_human_conversation = true THEN 1 ELSE 0 END)::int AS conv_today,
+          ${prevFilter ? `SUM(CASE WHEN (${prevFilter}) ${extra} AND is_human_conversation = true THEN 1 ELSE 0 END)::int` : '0::int'} AS conv_yesterday,
+          SUM(CASE WHEN (${dateFilter}) ${extra} AND meeting_booked = true THEN 1 ELSE 0 END)::int AS meetings_today,
+          ${prevFilter ? `SUM(CASE WHEN (${prevFilter}) ${extra} AND meeting_booked = true THEN 1 ELSE 0 END)::int` : '0::int'} AS meetings_yesterday,
+          SUM(CASE WHEN (${dateFilter}) ${extra} AND contact_outcome IN ${NO_INTEREST_OUTCOMES} THEN 1 ELSE 0 END)::int AS no_interest_today,
+          ${prevFilter ? `SUM(CASE WHEN (${prevFilter}) ${extra} AND contact_outcome IN ${NO_INTEREST_OUTCOMES} THEN 1 ELSE 0 END)::int` : '0::int'} AS no_interest_yesterday,
+          CAST(100.0 * SUM(CASE WHEN (${dateFilter}) ${extra} AND is_human_conversation = true THEN 1 ELSE 0 END)
+            / NULLIF(SUM(CASE WHEN (${dateFilter}) ${extra} THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) AS conv_rate_today,
+          ${prevFilter
+            ? `CAST(100.0 * SUM(CASE WHEN (${prevFilter}) ${extra} AND is_human_conversation = true THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN (${prevFilter}) ${extra} THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1))`
+            : '0::decimal'} AS conv_rate_yesterday,
+          CAST(100.0 * SUM(CASE WHEN (${dateFilter}) ${extra} AND meeting_booked = true THEN 1 ELSE 0 END)
+            / NULLIF(SUM(CASE WHEN (${dateFilter}) ${extra} AND is_human_conversation = true THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) AS conversion_rate_today,
+          ${prevFilter
+            ? `CAST(100.0 * SUM(CASE WHEN (${prevFilter}) ${extra} AND meeting_booked = true THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN (${prevFilter}) ${extra} AND is_human_conversation = true THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1))`
+            : '0::decimal'} AS conversion_rate_yesterday
+        FROM public.calls WHERE client_id = 1
       `),
+
+      // ── PERFORMANCE TREND ─────────────────────────────────────
       client.query(`
-        SELECT EXTRACT(HOUR FROM call_timestamp)::int as hour, COUNT(*)::int as calls_made,
-          SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int as conversations,
-          SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_booked
-        FROM public.calls WHERE client_id = 1 AND call_date = CURRENT_DATE
-        GROUP BY EXTRACT(HOUR FROM call_timestamp) ORDER BY hour
+        SELECT
+          CASE
+            WHEN '${dateRange}' IN ('Today','Yesterday')
+            THEN TO_CHAR(call_timestamp AT TIME ZONE 'America/Winnipeg', 'HH12 AM')
+            ELSE TO_CHAR(call_date, 'Mon DD')
+          END AS label,
+          COUNT(*)::int AS calls_made,
+          SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int AS conversations,
+          SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int AS meetings_booked
+        FROM public.calls WHERE ${baseWhere}
+        GROUP BY label, call_date, EXTRACT(HOUR FROM call_timestamp AT TIME ZONE 'America/Winnipeg')
+        ORDER BY call_date, EXTRACT(HOUR FROM call_timestamp AT TIME ZONE 'America/Winnipeg')
       `),
+
+      // ── CONV RATE OVER TIME ───────────────────────────────────
       client.query(`
-        SELECT EXTRACT(HOUR FROM call_timestamp)::int as hour,
-          CAST(100.0 * SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) as conv_rate,
-          CAST(100.0 * SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) as meeting_rate
-        FROM public.calls WHERE client_id = 1 AND call_date = CURRENT_DATE
-        GROUP BY EXTRACT(HOUR FROM call_timestamp) ORDER BY hour
+        SELECT
+          CASE
+            WHEN '${dateRange}' IN ('Today','Yesterday')
+            THEN TO_CHAR(call_timestamp AT TIME ZONE 'America/Winnipeg', 'HH12 AM')
+            ELSE TO_CHAR(call_date, 'Mon DD')
+          END AS label,
+          CAST(100.0 * SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) AS conv_rate,
+          CAST(100.0 * SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) AS meeting_rate
+        FROM public.calls WHERE ${baseWhere}
+        GROUP BY label, call_date, EXTRACT(HOUR FROM call_timestamp AT TIME ZONE 'America/Winnipeg')
+        ORDER BY call_date, EXTRACT(HOUR FROM call_timestamp AT TIME ZONE 'America/Winnipeg')
       `),
+
+      // ── OUTCOME BREAKDOWN ─────────────────────────────────────
       client.query(`
-        SELECT contact_outcome, COUNT(*)::int as count,
-          CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) as percentage
-        FROM public.calls WHERE client_id = 1 AND call_date = CURRENT_DATE
+        SELECT contact_outcome, COUNT(*)::int AS count,
+          CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) AS percentage
+        FROM public.calls WHERE ${baseWhere}
         GROUP BY contact_outcome ORDER BY count DESC
       `),
+
+      // ── TOP PERFORMERS ────────────────────────────────────────
       client.query(`
-        SELECT COALESCE(initiated_by, 'Didier') as sdr_name, COUNT(*)::int as calls,
-          SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int as conversations,
-          SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int as meetings,
-          CAST(100.0 * SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) as conv_rate
-        FROM public.calls WHERE client_id = 1 AND call_date = CURRENT_DATE
-        GROUP BY COALESCE(initiated_by, 'Didier') ORDER BY calls DESC
+        SELECT
+          COALESCE(bdr_name, initiated_by, 'Unknown') AS sdr_name,
+          COUNT(*)::int AS calls,
+          SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int AS conversations,
+          SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int AS meetings,
+          CAST(100.0 * SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) AS conv_rate,
+          CAST(100.0 * SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) AS conv_rate_pct
+        FROM public.calls WHERE ${baseWhere}
+        GROUP BY COALESCE(bdr_name, initiated_by, 'Unknown')
+        ORDER BY calls DESC LIMIT 10
       `),
+
+      // ── GOAL TRACKING ─────────────────────────────────────────
       client.query(`
         SELECT dt.calls_goal, dt.conversations_goal, dt.meetings_goal,
-          COALESCE(a.calls_today, 0) as calls_actual, COALESCE(a.conv_today, 0) as conv_actual,
-          COALESCE(a.meetings_today, 0) as meetings_actual
+          COALESCE(a.calls_actual, 0) AS calls_actual,
+          COALESCE(a.conv_actual, 0) AS conv_actual,
+          COALESCE(a.meetings_actual, 0) AS meetings_actual
         FROM public.daily_targets dt
         LEFT JOIN (
-          SELECT COUNT(*)::int as calls_today,
-            SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int as conv_today,
-            SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_today
-          FROM public.calls WHERE client_id = 1 AND call_date = CURRENT_DATE
+          SELECT
+            COUNT(*)::int AS calls_actual,
+            SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int AS conv_actual,
+            SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int AS meetings_actual
+          FROM public.calls WHERE ${baseWhere}
         ) a ON true
         ORDER BY dt.target_date DESC LIMIT 1
       `),
+
+      // ── BOOKING EFFICIENCY ────────────────────────────────────
       client.query(`
-        SELECT EXTRACT(HOUR FROM call_timestamp)::int as best_conv_hour,
-          CAST(AVG(NULLIF(call_duration_seconds, 0)) AS INTEGER) as avg_duration_seconds
-        FROM public.calls WHERE client_id = 1 AND call_date = CURRENT_DATE AND is_human_conversation = true
-        GROUP BY EXTRACT(HOUR FROM call_timestamp) ORDER BY COUNT(*) DESC LIMIT 1
+        SELECT
+          COUNT(*)::int AS total_calls,
+          SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int AS total_conversations,
+          SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int AS total_bookings,
+          SUM(CASE WHEN contact_outcome IN ${NO_INTEREST_OUTCOMES} THEN 1 ELSE 0 END)::int AS total_no_interest,
+          CAST(SUM(CASE WHEN contact_outcome IN ${NO_INTEREST_OUTCOMES} THEN 1 ELSE 0 END)::decimal
+            / NULLIF(SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) AS no_interest_before_booking,
+          CAST(SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::decimal
+            / NULLIF(SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) AS conversations_per_booking,
+          CAST(COUNT(*)::decimal
+            / NULLIF(SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END), 0) AS DECIMAL(5,1)) AS calls_per_booking
+        FROM public.calls WHERE ${baseWhere}
+      `),
+
+      // ── NO INTEREST RESET ─────────────────────────────────────
+      client.query(`
+        WITH last_booking AS (
+          SELECT call_timestamp AS last_booking_time
+          FROM public.calls WHERE ${baseWhere} AND meeting_booked = true
+          ORDER BY call_timestamp DESC LIMIT 1
+        )
+        SELECT
+          (SELECT COUNT(*)::int FROM public.calls
+           WHERE ${baseWhere} AND contact_outcome IN ${NO_INTEREST_OUTCOMES}
+           AND call_timestamp > COALESCE((SELECT last_booking_time FROM last_booking), '1970-01-01'::timestamptz)
+          ) AS no_interest_streak,
+          (SELECT TO_CHAR(last_booking_time AT TIME ZONE 'America/Winnipeg', 'Mon DD HH12:MI AM')
+           FROM last_booking) AS last_booking_time
+      `),
+
+      // ── CALL & CONV STREAKS ───────────────────────────────────
+      client.query(`
+        WITH last_booking AS (
+          SELECT call_timestamp AS last_booking_time
+          FROM public.calls WHERE ${baseWhere} AND meeting_booked = true
+          ORDER BY call_timestamp DESC LIMIT 1
+        )
+        SELECT
+          (SELECT COUNT(*)::int FROM public.calls
+           WHERE ${baseWhere}
+           AND call_timestamp > COALESCE((SELECT last_booking_time FROM last_booking), '1970-01-01'::timestamptz)
+          ) AS calls_since_last_booking,
+          (SELECT COUNT(*)::int FROM public.calls
+           WHERE ${baseWhere} AND is_human_conversation = true
+           AND call_timestamp > COALESCE((SELECT last_booking_time FROM last_booking), '1970-01-01'::timestamptz)
+          ) AS conversations_since_last_booking
+      `),
+
+      // ── BEST BOOKING RUN ──────────────────────────────────────
+      client.query(`
+        WITH bookings AS (
+          SELECT call_timestamp,
+            LAG(call_timestamp) OVER (ORDER BY call_timestamp) AS prev_booking
+          FROM public.calls WHERE ${allTimeWhere} AND meeting_booked = true
+          ORDER BY call_timestamp
+        ),
+        between_bookings AS (
+          SELECT
+            (SELECT COUNT(*) FROM public.calls c2
+             WHERE ${allTimeWhere} AND c2.is_human_conversation = true
+             AND c2.call_timestamp > COALESCE(b.prev_booking, '1970-01-01'::timestamptz)
+             AND c2.call_timestamp <= b.call_timestamp
+            )::int AS convs_between
+          FROM bookings b
+        )
+        SELECT
+          MIN(convs_between)::int AS best_booking_run_convs,
+          CAST(AVG(convs_between) AS DECIMAL(5,1)) AS avg_booking_run_convs,
+          (SELECT COUNT(*)::int FROM public.calls
+           WHERE ${allTimeWhere} AND meeting_booked = false) AS longest_dry_spell_calls
+        FROM between_bookings WHERE convs_between > 0
       `),
     ]);
+
     client.release();
+
+    const snap   = snapshotResult.rows[0]         || {};
+    const eff    = bookingEfficiencyResult.rows[0] || {};
+    const reset  = noInterestResetResult.rows[0]   || {};
+    const streak = streakResult.rows[0]            || {};
+    const best   = bestRunResult.rows[0]           || {};
+
     return res.status(200).json({
-      timestamp: new Date().toISOString(),
-      snapshot: snapshotResult.rows[0],
+      timestamp:        new Date().toISOString(),
+      dateRange,
+      compareLabel,
+      filters:          { bdr, company },
+      snapshot:         snap,
       performanceTrend: performanceTrendResult.rows,
-      convRateTrend: convRateTrendResult.rows,
+      convRateTrend:    convRateTrendResult.rows,
       outcomeBreakdown: outcomeBreakdownResult.rows,
-      topPerformers: topPerformersResult.rows,
-      goalTracking: goalTrackingResult.rows[0],
-      quickStats: quickStatsResult.rows[0],
+      topPerformers:    topPerformersResult.rows,
+      goalTracking:     goalTrackingResult.rows[0] || {},
+      bookingEfficiency: {
+        total_calls:                eff.total_calls                ?? 0,
+        total_conversations:        eff.total_conversations        ?? 0,
+        total_bookings:             eff.total_bookings             ?? 0,
+        total_no_interest:          eff.total_no_interest          ?? 0,
+        no_interest_before_booking: eff.no_interest_before_booking ?? null,
+        conversations_per_booking:  eff.conversations_per_booking  ?? null,
+        calls_per_booking:          eff.calls_per_booking          ?? null,
+        no_interest_streak:         reset.no_interest_streak       ?? 0,
+        last_booking_time:          reset.last_booking_time        ?? null,
+        calls_since_last_booking:   streak.calls_since_last_booking    ?? 0,
+        convs_since_last_booking:   streak.conversations_since_last_booking ?? 0,
+        best_booking_run_convs:     best.best_booking_run_convs    ?? null,
+        avg_booking_run_convs:      best.avg_booking_run_convs     ?? null,
+        longest_dry_spell_calls:    best.longest_dry_spell_calls   ?? 0,
+      },
     });
   } catch (error) {
     if (client) client.release();
@@ -366,8 +580,7 @@ async function handleTrends(req, res) {
           SUM(CASE WHEN is_human_conversation = true THEN 1 ELSE 0 END)::int as conversations
         FROM public.calls WHERE client_id = 1 AND call_date >= DATE_TRUNC('month', CURRENT_DATE)
         AND day_of_week IS NOT NULL AND call_hour IS NOT NULL
-        GROUP BY day_of_week, call_hour
-        ORDER BY day_of_week, hour
+        GROUP BY day_of_week, call_hour ORDER BY day_of_week, hour
       `),
       client.query(`
         SELECT TO_CHAR(call_date, 'Day') as day_name, EXTRACT(DOW FROM call_date)::int as day_num,
@@ -376,8 +589,7 @@ async function handleTrends(req, res) {
           SUM(CASE WHEN meeting_booked = true THEN 1 ELSE 0 END)::int as meetings_booked,
           CAST(100.0 * SUM(CASE WHEN contact_outcome = 'No Answer' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS DECIMAL(5,1)) as no_answer_rate
         FROM public.calls WHERE client_id = 1 AND call_date >= DATE_TRUNC('month', CURRENT_DATE)
-        GROUP BY TO_CHAR(call_date, 'Day'), EXTRACT(DOW FROM call_date)
-        ORDER BY day_num
+        GROUP BY TO_CHAR(call_date, 'Day'), EXTRACT(DOW FROM call_date) ORDER BY day_num
       `),
       client.query(`
         SELECT EXTRACT(HOUR FROM call_timestamp)::int as hour, COUNT(*)::int as total_calls,
@@ -749,14 +961,12 @@ async function handleMeetings(req, res) {
             ELSE 'Low Quality (<6)'
           END as quality_tier, COUNT(*)::int as count,
           CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) as percentage
-        FROM public.meetings m JOIN public.calls c ON c.id = m.call_id
-        WHERE c.client_id = 1
+        FROM public.meetings m JOIN public.calls c ON c.id = m.call_id WHERE c.client_id = 1
         GROUP BY CASE
             WHEN COALESCE(m.ai_quality_score, c.overall_call_score, 0) >= 8 THEN 'High Quality (8-10)'
             WHEN COALESCE(m.ai_quality_score, c.overall_call_score, 0) >= 6 THEN 'Medium Quality (6-7.9)'
             ELSE 'Low Quality (<6)'
-          END
-        ORDER BY count DESC
+          END ORDER BY count DESC
       `),
       client.query(`
         SELECT CASE
@@ -766,24 +976,20 @@ async function handleMeetings(req, res) {
             ELSE 'Other'
           END as source, COUNT(*)::int as count,
           CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) as percentage
-        FROM public.meetings m JOIN public.calls c ON c.id = m.call_id
-        WHERE c.client_id = 1
+        FROM public.meetings m JOIN public.calls c ON c.id = m.call_id WHERE c.client_id = 1
         GROUP BY CASE
             WHEN c.call_direction = 'outbound' THEN 'Cold Call'
             WHEN c.contact_outcome ILIKE '%follow%' THEN 'Follow-Up'
             WHEN c.contact_outcome ILIKE '%referral%' THEN 'Referral'
             ELSE 'Other'
-          END
-        ORDER BY count DESC
+          END ORDER BY count DESC
       `),
       client.query(`
         SELECT COALESCE(m.pipeline_stage, m.meeting_status, 'Booked') as stage, COUNT(*)::int as count,
           CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) as pct_of_total,
           CAST(COALESCE(SUM(m.est_pipeline_value), 0) AS DECIMAL(12,2)) as pipeline_value
-        FROM public.meetings m JOIN public.calls c ON c.id = m.call_id
-        WHERE c.client_id = 1
-        GROUP BY COALESCE(m.pipeline_stage, m.meeting_status, 'Booked')
-        ORDER BY count DESC
+        FROM public.meetings m JOIN public.calls c ON c.id = m.call_id WHERE c.client_id = 1
+        GROUP BY COALESCE(m.pipeline_stage, m.meeting_status, 'Booked') ORDER BY count DESC
       `),
       client.query(`
         SELECT CAST(AVG(NULLIF(m.ai_quality_score, 0)) AS DECIMAL(5,1)) as overall_avg,
@@ -802,8 +1008,7 @@ async function handleMeetings(req, res) {
         FROM public.calls c WHERE c.client_id = 1 AND c.meeting_booked = true
         AND c.call_date >= DATE_TRUNC('month', CURRENT_DATE)
         AND c.day_of_week IS NOT NULL AND c.call_hour IS NOT NULL
-        GROUP BY c.day_of_week, c.call_hour
-        ORDER BY day_of_week, hour
+        GROUP BY c.day_of_week, c.call_hour ORDER BY day_of_week, hour
       `),
       client.query(`
         SELECT m.id, m.meeting_datetime, m.cal_meeting_url, m.cal_status,
@@ -853,14 +1058,12 @@ async function handleProspects(req, res) {
       client.query(`
         SELECT COALESCE(source, 'Other') as source, COUNT(*)::int as count,
           CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) as percentage
-        FROM public.prospects WHERE organization_id = 1
-        GROUP BY source ORDER BY count DESC
+        FROM public.prospects WHERE organization_id = 1 GROUP BY source ORDER BY count DESC
       `),
       client.query(`
         SELECT COALESCE(industry, 'Other') as industry, COUNT(*)::int as count,
           CAST(100.0 * COUNT(*) / NULLIF(SUM(COUNT(*)) OVER (), 0) AS DECIMAL(5,1)) as percentage
-        FROM public.prospects WHERE organization_id = 1
-        GROUP BY industry ORDER BY count DESC LIMIT 8
+        FROM public.prospects WHERE organization_id = 1 GROUP BY industry ORDER BY count DESC LIMIT 8
       `),
       client.query(`
         SELECT COUNT(*)::int as total_prospects,
@@ -945,8 +1148,7 @@ async function handleResearch(req, res) {
       client.query(`
         SELECT status, COUNT(*)::int as count,
           CAST(AVG(NULLIF(research_depth_score, 0)) AS DECIMAL(5,1)) as avg_score
-        FROM public.prospects WHERE organization_id = 1
-        GROUP BY status ORDER BY count DESC
+        FROM public.prospects WHERE organization_id = 1 GROUP BY status ORDER BY count DESC
       `),
     ]);
     client.release();
@@ -978,8 +1180,7 @@ async function handleReports(req, res) {
       `),
       client.query(`
         SELECT id, report_type, report_name, format, status, file_url, scheduled, created_at
-        FROM public.reports_log WHERE organization_id = 1
-        ORDER BY created_at DESC LIMIT 10
+        FROM public.reports_log WHERE organization_id = 1 ORDER BY created_at DESC LIMIT 10
       `),
       client.query(`
         SELECT report_type, COUNT(*)::int as count,
@@ -989,8 +1190,7 @@ async function handleReports(req, res) {
       `),
       client.query(`
         SELECT id, report_type, report_name, schedule_freq, next_run_at, status
-        FROM public.reports_log WHERE organization_id = 1 AND scheduled = true
-        ORDER BY next_run_at ASC LIMIT 10
+        FROM public.reports_log WHERE organization_id = 1 AND scheduled = true ORDER BY next_run_at ASC LIMIT 10
       `),
       client.query(`
         SELECT DATE(created_at) as report_date, TO_CHAR(DATE(created_at), 'Mon DD') as date_label, COUNT(*)::int as count
