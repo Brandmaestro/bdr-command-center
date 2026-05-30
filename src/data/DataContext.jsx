@@ -1,8 +1,7 @@
-import React, { createContext, useState, useEffect, useContext } from 'react';
+import React, { createContext, useState, useEffect, useContext, useCallback } from 'react';
 
 export const DataContext = createContext();
 
-// ── Endpoint map — one per page ──────────────────────────────────
 const ENDPOINTS = {
   overview:    '/api/index?page=dashboard',
   performance: '/api/index?page=performance',
@@ -19,7 +18,6 @@ const ENDPOINTS = {
   settings:    '/api/index?page=settings',
 };
 
-// ── Normalize overview data (keeps Overview.jsx working unchanged) ─
 const processOverview = (result) => ({
   ...result,
   today: {
@@ -37,21 +35,53 @@ const processOverview = (result) => ({
 });
 
 export const DataProvider = ({ children }) => {
-  // ── Active page key — set by App.jsx via setPage ─────────────
-  const [page, setPage]           = useState('overview');
+  const [page, setPage]               = useState('overview');
+  const [cache, setCache]             = useState({});
+  const [countdown, setCountdown]     = useState(60);
 
-  // ── Per-page cache: { [pageKey]: { data, status, lastUpdated } }
-  const [cache, setCache]         = useState({});
+  // ── Filters ───────────────────────────────────────────────────
+  const [dateRange, setDateRange]     = useState('Today');
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd]     = useState('');
+  const [selectedBDR, setSelectedBDR] = useState('All');
+  const [selectedCompany, setSelectedCompany] = useState('All');
+  const [metricScope, setMetricScope] = useState('Personal');
 
-  // ── Shared refresh UI state ───────────────────────────────────
-  const [countdown, setCountdown] = useState(60);
+  // ── Filter options (populated from DB) ───────────────────────
+  const [bdrList, setBdrList]         = useState([]);
+  const [companyList, setCompanyList] = useState([]);
+
+  // ── Fetch filter options once on mount ────────────────────────
+  useEffect(() => {
+    fetch('/api/index?page=filters')
+      .then(r => r.json())
+      .then(d => {
+        if (d.bdrs)      setBdrList(d.bdrs);
+        if (d.companies) setCompanyList(d.companies);
+      })
+      .catch(() => {});
+  }, []);
+
+  // ── Build URL with all filter params ─────────────────────────
+  const buildUrl = useCallback((pageKey, dr, cs, ce, bdr, company) => {
+    const base = ENDPOINTS[pageKey];
+    if (!base) return null;
+    const params = new URLSearchParams();
+    params.set('dateRange', dr || 'Today');
+    if (dr === 'Custom' && cs && ce) {
+      params.set('customStart', cs);
+      params.set('customEnd', ce);
+    }
+    if (bdr && bdr !== 'All')     params.set('bdr', bdr);
+    if (company && company !== 'All') params.set('company', company);
+    return `${base}&${params.toString()}`;
+  }, []);
 
   // ── Fetch for a given page key ────────────────────────────────
-  const fetchPage = (pageKey) => {
-    const endpoint = ENDPOINTS[pageKey];
-    if (!endpoint) return;
+  const fetchPage = useCallback((pageKey, dr, cs, ce, bdr, company) => {
+    const url = buildUrl(pageKey, dr, cs, ce, bdr, company);
+    if (!url) return;
 
-    // Mark as loading only if we have no cached data yet
     setCache(prev => ({
       ...prev,
       [pageKey]: {
@@ -61,7 +91,7 @@ export const DataProvider = ({ children }) => {
       },
     }));
 
-    fetch(endpoint)
+    fetch(url)
       .then(res => {
         if (!res.ok) throw new Error('Network response was not ok');
         return res.json();
@@ -70,11 +100,7 @@ export const DataProvider = ({ children }) => {
         const processed = pageKey === 'overview' ? processOverview(result) : result;
         setCache(prev => ({
           ...prev,
-          [pageKey]: {
-            data:        processed,
-            status:      'live',
-            lastUpdated: new Date(),
-          },
+          [pageKey]: { data: processed, status: 'live', lastUpdated: new Date() },
         }));
         setCountdown(60);
       })
@@ -89,28 +115,28 @@ export const DataProvider = ({ children }) => {
           },
         }));
       });
-  };
+  }, [buildUrl]);
 
-  // ── Fetch on page change ──────────────────────────────────────
+  // ── Refetch when any filter changes ──────────────────────────
   useEffect(() => {
-    fetchPage(page);
-  }, [page]);
+    fetchPage(page, dateRange, customStart, customEnd, selectedBDR, selectedCompany);
+  }, [page, dateRange, customStart, customEnd, selectedBDR, selectedCompany]);
 
-  // ── Auto-refresh current page every 60 seconds ────────────────
+  // ── Auto-refresh every 60 seconds ────────────────────────────
   useEffect(() => {
-    const interval = setInterval(() => fetchPage(page), 60000);
+    const interval = setInterval(
+      () => fetchPage(page, dateRange, customStart, customEnd, selectedBDR, selectedCompany),
+      60000
+    );
     return () => clearInterval(interval);
-  }, [page]);
+  }, [page, dateRange, customStart, customEnd, selectedBDR, selectedCompany]);
 
   // ── Countdown timer ───────────────────────────────────────────
   useEffect(() => {
-    const timer = setInterval(() => {
-      setCountdown(c => (c <= 1 ? 60 : c - 1));
-    }, 1000);
+    const timer = setInterval(() => setCountdown(c => (c <= 1 ? 60 : c - 1)), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // ── Current page data ─────────────────────────────────────────
   const current     = cache[page] ?? { data: null, status: 'loading', lastUpdated: null };
   const data        = current.data;
   const status      = current.status;
@@ -118,25 +144,26 @@ export const DataProvider = ({ children }) => {
 
   const manualRefresh = () => {
     setCountdown(60);
-    fetchPage(page);
+    fetchPage(page, dateRange, customStart, customEnd, selectedBDR, selectedCompany);
   };
 
   return (
     <DataContext.Provider value={{
-      data,
-      status,
-      countdown,
-      lastUpdated,
-      manualRefresh,
-      setPage,         // consumed by App.jsx on nav click
+      data, status, countdown, lastUpdated, manualRefresh, setPage,
       currentPage: page,
+      dateRange, setDateRange,
+      customStart, setCustomStart,
+      customEnd, setCustomEnd,
+      selectedBDR, setSelectedBDR,
+      selectedCompany, setSelectedCompany,
+      metricScope, setMetricScope,
+      bdrList, companyList,
     }}>
       {children}
     </DataContext.Provider>
   );
 };
 
-// ── Hook for easy consumption ─────────────────────────────────────
 export function useData() {
   return useContext(DataContext);
 }
